@@ -84,7 +84,7 @@ defmodule Deejay.Port do
 
     send(self(), :accept)
 
-    handle_client(client, state.router)
+    Task.start(fn -> handle_client(client, state.router) end)
 
     {:noreply, state}
   end
