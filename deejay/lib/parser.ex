@@ -45,7 +45,7 @@ defmodule Deejay.Http.Response do
       end
 
     headers =
-      Map.put(headers, "Content-Length", byte_size(body))
+      Map.put(headers, "Content-Length", Integer.to_string(byte_size(body)))
 
     header_text =
       headers
@@ -62,7 +62,7 @@ defmodule Deejay.Http.Response do
 end
 
 defmodule Deejay.Parser do
-  def atom_method(cmd) do
+  defp atom_method(cmd) do
     case cmd do
       "GET" ->
         {:ok, :get}
@@ -96,19 +96,23 @@ defmodule Deejay.Parser do
     end
   end
 
-  def parse_method(src) do
-    [method, target, version] = String.split(src, " ")
+  defp parse_method(src) do
+    case String.split(src, " ", parts: 3) do
+      [method, target, version] ->
+        case atom_method(method) do
+          {:ok, method} ->
+            {:ok, method, target, version}
 
-    case atom_method(method) do
-      {:ok, method} ->
-        {:ok, method, target, version}
+          {:error, reason} ->
+            {:error, reason}
+        end
 
-      {:error, reason} ->
-        {:error, reason}
+      _ ->
+        {:error, :invalid_request_line}
     end
   end
 
-  def parse_header(src) do
+  defp parse_header(src) do
     case String.split(src, ":", parts: 2) do
       [name, value] ->
         {:ok, {name, String.trim(value)}}
@@ -119,74 +123,86 @@ defmodule Deejay.Parser do
   end
 
   def parse_request(src) do
-    lines = String.split(src, "\r\n")
-
-    valid_headers = %{
-      get: ["host", "user-agent", "accept"],
-      post: ["host", "content-type", "content-length"],
-      put: ["host", "content-type", "content-length"],
-      patch: ["host", "content-type", "content-length"],
-      delete: ["host"],
-      head: ["host"],
-      options: ["host", "allow"],
-      connect: ["host"],
-      trace: ["host"]
-    }
-
-    index = Enum.find_index(lines, &(&1 == ""))
-
-    if index == nil do
-      {:error, :invalid_request}
-    else
-      [request_line | raw_headers] = Enum.take(lines, index)
-
-      body =
-        lines
-        |> Enum.drop(index + 1)
-        |> Enum.join("\r\n")
-
-      with {:ok, method, target, version} <- parse_method(request_line) do
-        {path, query} =
-          case String.split(target, "?", parts: 2) do
-            [path, query] -> {path, query}
-            [path] -> {path, nil}
-          end
-
-        headers =
-          raw_headers
-          |> Enum.map(fn header ->
-            case parse_header(header) do
-              {:ok, {name, value}} ->
-                {String.downcase(name), value}
-
-              {:error, reason} ->
-                raise "Invalid header: #{reason}"
-            end
-          end)
-          |> Map.new()
-
-        required_headers = Map.get(valid_headers, method, [])
-
-        missing =
-          required_headers
-          |> Enum.reject(fn required ->
-            Map.has_key?(headers, required) == true
-          end)
-
-        if missing == [] do
-          {:ok,
-           %Deejay.Http.Request{
-             command: method,
-             path: path,
-             query: query,
-             version: version,
-             headers: headers,
-             body: body
-           }}
-        else
-          {:error, {:missing_headers, missing}}
-        end
+    {head, body} =
+      case String.split(src, "\r\n\r\n", parts: 2) do
+        [head, body] -> {head, body}
+        [head] -> {head, ""}
       end
+
+    lines = String.split(head, "\r\n")
+
+    case lines do
+      [request_line | raw_headers] ->
+        with {:ok, method, target, version} <- parse_method(request_line),
+             :ok <- validate_version(version) do
+          {path, query} =
+            case String.split(target, "?", parts: 2) do
+              [path, query] -> {path, query}
+              [path] -> {path, nil}
+            end
+
+          headers =
+            raw_headers
+            |> Enum.reduce(%{}, fn header, acc ->
+              case parse_header(header) do
+                {:ok, {name, value}} ->
+                  Map.put(acc, String.downcase(name), value)
+
+                {:error, _} ->
+                  acc
+              end
+            end)
+
+          case validate_request(method, headers, body) do
+            :ok ->
+              {:ok,
+               %Deejay.Http.Request{
+                 command: method,
+                 path: path,
+                 query: query,
+                 version: version,
+                 headers: headers,
+                 body: body
+               }}
+
+            {:error, reason} ->
+              {:error, reason}
+          end
+        end
+
+      _ ->
+        {:error, :invalid_request}
+    end
+  end
+
+  defp validate_version("HTTP/1.1"), do: :ok
+  defp validate_version(_), do: {:error, :unsupported_version}
+
+  defp validate_request(method, headers, body)
+       when method in [:post, :put, :patch] do
+    cond do
+      not Map.has_key?(headers, "content-length") ->
+        {:error, :missing_content_length}
+
+      true ->
+        case Integer.parse(headers["content-length"]) do
+          {length, ""} when length == byte_size(body) ->
+            :ok
+
+          {_, ""} ->
+            {:error, :invalid_body_length}
+
+          _ ->
+            {:error, :invalid_content_length}
+        end
+    end
+  end
+
+  defp validate_request(_, headers, _) do
+    if Map.has_key?(headers, "host") do
+      :ok
+    else
+      {:error, :missing_host}
     end
   end
 end
