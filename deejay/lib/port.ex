@@ -1,5 +1,10 @@
 defmodule Deejay.Port.State do
-  defstruct [:port, :socket, :tcp_opts]
+  defstruct [
+    :port,
+    :socket,
+    :tcp_opts,
+    :router
+  ]
 end
 
 defmodule Deejay.Port.InitOptions do
@@ -31,25 +36,26 @@ defmodule Deejay.Port do
   @impl true
   def init(opts) do
     port = Keyword.get(opts, :port, 4050)
-    tcp_opts = Keyword.get(opts, :tcp_opts, %Deejay.Port.InitOptions{})
+    router = Keyword.fetch!(opts, :router)
 
     send(self(), :init)
 
     {:ok,
      %Deejay.Port.State{
        port: port,
-       tcp_opts: tcp_opts
+       router: router,
+       tcp_opts: Keyword.get(opts, :tcp_opts, %Deejay.Port.InitOptions{})
      }}
   end
 
-  def handle_client(client) do
+  def handle_client(client, router) do
     case :gen_tcp.recv(client, 0) do
       {:ok, data} ->
         response =
           case Deejay.Parser.parse_request(data) do
             {:ok, request} ->
               request
-              |> Deejay.Router.route()
+              |> Deejay.Router.route(router)
               |> Deejay.Http.Response.serialize()
 
             {:error, _reason} ->
@@ -78,9 +84,7 @@ defmodule Deejay.Port do
 
     send(self(), :accept)
 
-    spawn(fn ->
-      handle_client(client)
-    end)
+    handle_client(client, state.router)
 
     {:noreply, state}
   end
