@@ -78,7 +78,9 @@ defmodule Deejay.Port do
 
     send(self(), :accept)
 
-    spawn(&handle_client(client))
+    spawn(fn ->
+      handle_client(client)
+    end)
 
     {:noreply, state}
   end
